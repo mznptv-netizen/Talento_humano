@@ -1,0 +1,90 @@
+name: Generar ejecutable Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+          architecture: x64
+
+      - name: Instalar dependencias
+        run: python -m pip install -r requirements.txt "pyinstaller>=6.11,<7" Pillow
+
+      - name: Probar base de datos e importacion
+        run: python pruebas.py
+
+      - name: Crear EXE con el logo incluido
+        run: >-
+          python -m PyInstaller --noconfirm --clean --onefile --windowed
+          --name Talento_Humano_IPSICOL
+          --icon logo_ipsicol.png
+          --add-data "logo_ipsicol.png:."
+          --add-data "catalogos_colombia.json:."
+          --hidden-import importar_excel
+          --hidden-import openpyxl
+          --collect-all customtkinter
+          --hidden-import interfaz
+          --hidden-import datos_demo
+          --hidden-import relaciones
+          --hidden-import asignaciones_ui
+          talento_humano.py
+
+      - name: Comprobar que el EXE inicia
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP "ipsicol-smoke.txt"
+          $env:IPSICOL_SMOKE_REPORT = $report
+          $process = Start-Process -FilePath ".\dist\Talento_Humano_IPSICOL.exe" -ArgumentList "--smoke-test" -PassThru
+          if (-not $process.WaitForExit(90000)) {
+            Stop-Process -Id $process.Id -Force
+            throw "El ejecutable no termino la prueba en 90 segundos."
+          }
+          if (Test-Path $report) { Get-Content $report }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $report)) {
+            throw "Fallo la prueba de inicio del ejecutable."
+          }
+          if ((Get-Content $report -Raw).Trim() -ne "OK") {
+            throw "La comprobacion del ejecutable no fue satisfactoria."
+          }
+
+      - name: Dejar el EXE disponible en Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: Talento_Humano_IPSICOL-Windows
+          path: dist/Talento_Humano_IPSICOL.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  publicar:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Talento_Humano_IPSICOL-Windows
+          path: dist
+
+      - name: Adjuntar EXE a la version publicada
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/Talento_Humano_IPSICOL.exe --clobber
